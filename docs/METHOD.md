@@ -1,60 +1,29 @@
 # Method
 
-## Object targets and matched queries
+## Object references and queries
 
-The frozen CLIP ViT-B/16 teacher produces a 40 × 40 feature map for a 640 × 640 input. AnyUp upsamples the features to 80 × 80. For each ground-truth box, `object_targets` pools a 3 × 3 bilinear quadrature and normalizes the resulting feature to obtain the target $t_k$.
+Inputs preserve aspect ratio and are centered on a 640×640 canvas. CLIP ViT-B/16 applies bicubic interpolation to patch positional embeddings while retaining the CLS position. Final transformer patch outputs receive `ln_post`; CLS and `visual.proj` are excluded. AnyUp uses RGB guidance normalized with ImageNet statistics and outputs 160×160 features. Object references are the normalized means of bilinear samples at 4×4 bin centers.
 
-Hungarian matching associates ground-truth objects with ordinary queries from the final decoder layer. A learned linear projection maps each matched query $h_{\sigma(k)}$ to $z_k = P(h_{\sigma(k)})$. Denoising queries are excluded. Teacher targets are detached from the training graph.
+The final ordinary queries are matched to all valid annotations using rectangular Hungarian assignment. Denoising queries are excluded. At most 300 objects enter the object loss; evaluation denominators retain every valid annotation. The independent projections are `Linear(256,768,bias=False)` and `Conv2d(256,768,1,bias=False)`, initialized with Xavier uniform weights.
 
-## Query anchor
+## Graph and losses
 
-$$
-L_{\mathrm{anchor}} = \frac{1}{N}\sum_k \lVert z_k-t_k\rVert_2^2.
-$$
+A pair belongs to the graph exactly when its object centers occupy the same 16-pixel teacher patch. The anchor averages squared Euclidean residuals over matched objects, retaining the sum over 768 feature dimensions. Each image contributes equally, including differentiable zeros for empty objects or edges.
 
-## Local graph
+For an edge, define `d=t_k-t_l`, `s=||d||²`, `a=s+v+1e-6`, `gamma=s/a`, and `omega=gamma/a`. Variation `v` is the average squared difference between the clean edge target and two independently perturbed teacher-view targets. Both brightness and contrast factors are sampled independently from `[0.9,1.1]`, without changing geometry. Teacher features and all edge coefficients are detached.
 
-`graph_edges` connects unordered object pairs whose centers occupy the same cell in either the 80 × 80 student grid or the 40 × 40 teacher grid. For aligned grids, the finer cells are nested within the coarse cells, so the resulting edge set equals the set of pairs sharing a teacher cell.
+The difference term is the edge mean of `omega * ||(z_k-z_l)-d||²`. Uniform difference supervision replaces omega by one. Weighted-degree anchoring replaces the difference term with `sum_k degree_k*||z_k-t_k||² / max(1,|E|)`. This preserves the diagonal quadratic coefficients on the same graph and removes the cross-object terms.
 
-## Weighted query differences
+Deep supervision uses mean cosine error on the 20×20 AIFI output, after its independent projection. Teacher resizing uses bilinear interpolation with `align_corners=False`. Cosine calculations use FP32, norm floor `1e-6`, and clipping to `[-1,1]`.
 
-Teacher views use brightness scales of 1.0, 0.95, and 1.05 while preserving geometry. For each local edge $(k,l)$:
+## Optimization
 
-$$
-d_{kl}=t_k-t_l,\qquad e_{kl}=\lVert d_{kl}\rVert_2^2,
-$$
+The object coefficients remain fixed at 1 and 0.1. GAM starts at 20, uses the gradient L1 share of all AIFI attention, FFN, and normalization parameters, and includes the independent projections in its total trainable-parameter denominator. Unscaled gradients are averaged across workers before measurement and global norm clipping. Above share 0.12 the next coefficient is multiplied by `0.10/share`; below 0.10 it is multiplied by `0.12/max(share,1e-12)`. The coefficient is retained inside the interval and when there are no valid steps; its bounds are `[1e-4,1e4]`.
 
-$$
-v_{kl}=\frac{1}{R}\sum_r\lVert(t_k^r-t_l^r)-d_{kl}\rVert_2^2,
-$$
+The fixed-strength control accumulates base and auxiliary gradients over the effective batch, averages them across workers, and maintains EMA L2 norms with decay 0.95 on deployed detector parameters. The coefficient is the requested gradient target times the ratio of EMA norms, clipped to `[1e-4,1e3]`. Empty or negligible auxiliary gradients receive coefficient zero. Nonfinite losses or gradients skip both the optimization update and monitoring statistics.
 
-$$
-w_{kl}=\frac{e_{kl}}{(e_{kl}+v_{kl}+\epsilon)^2},\qquad \epsilon=10^{-4},
-$$
+LMN computes the two log-loss gradients on AIFI parameters, averages them across workers, solves the two-vector minimum-norm mixture with alpha constrained to `[0.05,0.95]`, and forms detached loss coefficients whose sum is two. The object terms remain additive and are excluded from the mixture solution.
 
-$$
-L_{\mathrm{diff}}=\frac{1}{|E|}\sum_{(k,l)\in E}w_{kl}\lVert(z_k-z_l)-d_{kl}\rVert_2^2.
-$$
+## Inference
 
-The weights are detached. Mode `A2` uses uniform weights on the same edges. Empty object and edge sets return differentiable zero losses.
-
-## Training objective
-
-$$
-L=L_{\mathrm{det}}+\lambda_{\mathrm{deep}}L_{\mathrm{DSI}}+\lambda_{\mathrm{anchor}}L_{\mathrm{anchor}}+\lambda_{\mathrm{diff}}L_{\mathrm{diff}}.
-$$
-
-Deep distillation uses the AIFI output before the feature pyramid, a 1 × 1 projection to 768 channels, and coarse CLIP features. GAM adjusts the deep-distillation coefficient using a gradient-share odds ratio with target 11%, exponent 1, and an update factor bounded between 0.1 and 10.
-
-Query coefficients are calibrated using the first four training images containing local edges. The mean initial anchor and weighted-difference losses are each scaled to 0.1 times the mean initial detection loss, with command-line multipliers applied. Random generator states are restored after calibration.
-
-## Implementation
-
-| Component | Location |
-|---|---|
-| Object targets, local graph, anchor and difference losses, GAM | `projects/rtdetrv4_uav/query_difference.py` |
-| Frozen teacher, matched-query extraction, calibration and training | `projects/rtdetrv4_uav/run_query_difference.py` |
-| Detector construction | `projects/rtdetrv4_uav/train_visdrone.py` |
-| Detector inference | `tools/infer_querydiff.py` |
-
-The detector uses ten VisDrone classes and a shared random initialization for classification heads under a fixed seed. Teacher features are cached by input pixels, boxes, source hashes, and teacher weight hashes. Inference uses the trained detector weights and excludes teacher computation and auxiliary projections.
+Only the detector is evaluated. Each ordinary query contributes its highest-scoring class and one continuous-coordinate box. Predictions are clipped to the original image, stably sorted by score and query ID, and limited to 300 per image.

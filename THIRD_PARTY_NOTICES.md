@@ -1,9 +1,9 @@
-# Third-party sources
+# Third-party components
 
-- RT-DETRv4: https://github.com/RT-DETRs/RT-DETRv4 — source and license in `work/RT-DETRv4/`.
-- AnyUp: https://github.com/wimmerth/anyup — source, license, and package metadata in `research/2026_method_survey_20261010/upstream/anyup_archive/` (CC BY 4.0).
-- VisDrone Python evaluation toolkit: https://github.com/tjiiv-cprg/visdrone-det-toolkit-python — source and license in `work/visdrone-det-toolkit-python-api/`.
-- CLIP ViT-B/16: https://huggingface.co/openai/clip-vit-base-patch16.
-- VisDrone dataset and detection protocol: https://github.com/VisDrone/VisDrone2018-DET-toolkit.
+- **RT-DETRv4**, RT-DETRv4 authors: https://github.com/RT-DETRs/RT-DETRv4. Detector source and Apache-2.0 license: `third_party/rtdetrv4/`.
+- **AnyUp**, AnyUp authors: https://github.com/wimmerth/anyup. Source and CC BY 4.0 license: `third_party/anyup/`.
+- **VisDrone Python evaluation toolkit**, tjiiv-cprg: https://github.com/tjiiv-cprg/visdrone-det-toolkit-python. Source and license: `third_party/visdrone_eval/`.
+- **CLIP**, OpenAI: https://github.com/openai/CLIP. Installed from the authors' distribution under its MIT license.
+- **VisDrone**, AISKYEYE team, Tianjin University: https://github.com/VisDrone/VisDrone-Dataset. Dataset images and annotations are obtained from the dataset provider.
 
-Third-party components retain their respective copyright notices and licenses. Dataset and pretrained model use is subject to the terms of their providers.
+Third-party components retain their original authorship, copyright notices, and licenses. Pretrained weights and datasets are subject to their providers' terms.

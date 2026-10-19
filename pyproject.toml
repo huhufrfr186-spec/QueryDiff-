@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "querydiff"
+version = "1.0.0"
+description = "Local Query Difference Distillation for Dense Aerial Object Detection"
+requires-python = ">=3.11"
+authors = [
+  {name = "Yanting Hu"},
+  {name = "Qinyong Zeng"},
+  {name = "Jiahao Wen"},
+]
+
+[tool.setuptools.packages.find]
+include = ["querydiff*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

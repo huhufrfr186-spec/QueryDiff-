@@ -1,99 +1,107 @@
-# QueryDiff: Local Query Difference Distillation for Aerial Object Detection
+# QueryDiff
 
-QueryDiff transfers object-level semantic structure from a frozen vision teacher to an aerial object detector. It combines matched-query feature alignment with local query difference supervision, using teacher feature energy and brightness-view variation to weight local relations.
+**Local Query Difference Distillation for Dense Aerial Object Detection**
 
-The detector is RT-DETRv4-S. CLIP ViT-B/16 and AnyUp construct teacher targets during training. Inference uses the trained detector directly, without the teacher or auxiliary projection heads.
+Yanting Hu, Qinyong Zeng, and Jiahao Wen  
+School of Aeronautics and Astronautics, University of Electronic Science and Technology of China  
+Corresponding author: Qinyong Zeng — qyzeng@uestc.edu.cn
+
+QueryDiff transfers object-level relative structure from a frozen visual teacher to the final prediction queries of an aerial detector. Absolute object anchoring constrains individual fitting errors, while local vector differences couple neighboring query errors within teacher patches. Energy–repeatability weights allocate the difference supervision. Teacher networks and distillation projections are used during training; inference uses the detector alone.
 
 ## Method
 
-1. Extract frozen CLIP features and upsample them with AnyUp.
-2. Pool and normalize object features inside ground-truth boxes.
-3. Associate final decoder queries with objects through Hungarian matching.
-4. Align projected queries with object targets and supervise differences between nearby object pairs.
-5. Combine query supervision with detection loss and deep feature distillation.
+The RT-DETRv4-S student uses 300 ordinary queries. Frozen CLIP ViT-B/16 patch features, extracted after `ln_post` and before the image–text projection, provide a 40×40×768 teacher map. AnyUp produces a 160×160 reference. Bilinear sampling at 4×4 bin centers forms an L2-normalized reference for each annotated object.
 
-Equations and module descriptions are in [Method](docs/METHOD.md). Training variants and evaluation settings are in [Experiments](docs/EXPERIMENTS.md).
+Final-layer Hungarian matching associates objects with prediction queries. A shared bias-free projection maps queries to the teacher feature space. Objects whose centers fall in the same 16-pixel teacher patch form an undirected local graph. The training objective is
+
+```math
+L = L_{det} + \lambda_e L_{deep} + \lambda_a L_{anchor} + \lambda_r L_{diff},
+```
+
+with `λa=1`, `λr=0.1`, and an initial deep coefficient of `20`. GAM updates the deep coefficient between epochs using the AIFI gradient share. [Method details](docs/METHOD.md) describe the loss reductions, weighting, and degree control.
 
 ## Installation
 
-Use Python 3.10 or later and install PyTorch and torchvision appropriate for your CUDA setup, then install the project dependencies:
+Use Python 3.11 or later with a compatible PyTorch/torchvision installation.
 
 ```bash
 python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 ## Data and pretrained weights
 
-Download the VisDrone2019-DET training data, the RT-DETRv4-S COCO checkpoint, CLIP ViT-B/16, and the AnyUp checkpoint from their respective sources listed in [Third-party sources](THIRD_PARTY_NOTICES.md). Arrange them as follows:
+Obtain [VisDrone2019-DET](https://github.com/VisDrone/VisDrone-Dataset), the [RT-DETRv4-S COCO checkpoint](https://github.com/RT-DETRs/RT-DETRv4), [OpenAI CLIP ViT-B/16](https://github.com/openai/CLIP), and [AnyUp](https://github.com/wimmerth/anyup/releases/download/checkpoint/anyup_paper.pth). Arrange the files as follows, or set their locations in `configs/visdrone.yaml`:
 
 ```text
 QueryDiff/
 ├── data/
-│   ├── VisDrone2019-DET-train/
-│   │   ├── images/
-│   │   └── annotations/
-│   └── research_protocol_v1/coco_split_A/
-│       ├── fit.json
-│       └── development.json
-├── models/
-│   ├── rtdetrv4_s_official.pth
-│   └── openai--clip-vit-base-patch16/
-│       └── 57c216476eefef5ab752ec549e440a49ae4ae5f3/
-│           ├── config.json
-│           ├── preprocessor_config.json
-│           └── pytorch_model.bin
-└── research/2026_method_survey_20261010/upstream/anyup_archive/
+│   ├── VisDrone2019-DET-train/{images,annotations}/
+│   ├── VisDrone2019-DET-val/{images,annotations}/
+│   └── VisDrone2019-DET-test-dev/{images,annotations}/
+└── weights/
+    ├── rtdetrv4_s_coco.pth
+    ├── ViT-B-16.pt
     └── anyup_paper.pth
 ```
 
-The split files define image membership; training reads the original ten-class VisDrone TXT annotations. Asset paths and SHA-256 checksums are listed in `assets_manifest.json`.
-
-Check the data and model files before training:
-
-```bash
-python tools/check_assets.py
-```
+CLIP uses the OpenAI `ViT-B-16.pt` checkpoint with SHA-256 `5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f`. Images preserve their aspect ratio and are centrally padded to 640×640. The training and validation loaders use their complete official splits and the original ten-class annotations.
 
 ## Training
 
-Run QueryDiff with energy/variation-weighted local differences:
+Train on two GPUs with effective batch size 16:
 
 ```bash
-python projects/rtdetrv4_uav/run_query_difference.py --mode M --name querydiff_M --epochs 3 --fit-limit 128 --dev-limit 32 --conditions
+torchrun --standalone --nproc_per_node=2 tools/train.py --config configs/visdrone.yaml --mode M --seed 0 --output runs/M_seed0
 ```
 
-`--name` selects a new output directory under `results/`. Configure the epoch count and image limits for the intended experiment; a limit of `0` uses every image in the corresponding split. `--seed` controls the random seed and `--device` selects `cuda` or `cpu`.
+For one GPU, the same command can be launched with `python tools/train.py`; accumulation adjusts to preserve the effective batch size. The default schedule is 72 epochs, AdamW, learning rates `4e-4` and `2e-4` for main and backbone parameters, 1000 warmup updates, cosine decay to 1%, weight decay `1e-4`, and gradient clipping at `0.1`.
 
-| Mode | Deep feature distillation | Query anchor | Local query differences |
-|---|---|---|---|
-| `B` | Yes | No | No |
-| `Q` | Yes | Yes | No |
-| `M` | Yes | Yes | Energy/variation weighted |
-| `A2` | Yes | Yes | Uniform weight |
-
-Each epoch evaluates clean images. `--conditions` also evaluates reduced-resolution and blurred images after the final epoch. Run outputs include the detector checkpoint, training history, metrics, and predictions.
-
-## Inference
+| Mode | Object anchor | Relation objective |
+|---|---|---|
+| `B` | Off | Off |
+| `Q` | On | Off |
+| `M` | On | Energy–repeatability-weighted vector differences |
+| `A2` | On | Uniform vector differences |
+| `degree` | On | Weighted-degree anchoring |
+| `R` | Region anchor | Off |
+| `C1` | Region anchor | Weighted differences |
 
 ```bash
-python tools/infer_querydiff.py --checkpoint results/querydiff_M/last.pth --image path/to/image.jpg --output results/predictions.json --device cuda
+python tools/train.py --mode Q --seed 0 --output runs/Q_seed0
+python tools/train.py --mode degree --seed 0 --output runs/degree_seed0
+python tools/train.py --mode M --weight-form gamma --relation-weight 1.6 --seed 3 --output runs/gamma_seed3
+python tools/train.py --mode M --gradient-control --gradient-target 0.1 --seed 20 --output runs/normalized_M_seed20
 ```
 
-The prediction JSON contains bounding boxes in original-image coordinates, confidence scores, and VisDrone category IDs from 1 to 10. The detector configuration and RT-DETRv4 initialization checkpoint should be placed at the paths above.
+`--gradient-control` uses per-image mean-normalized weights, fixes the deep coefficient at 20, and controls auxiliary gradient strength on deployed detector parameters. `--lmn` selects logarithmic minimum-norm combination. [Experiments](docs/EXPERIMENTS.md) lists the ablation controls and coefficient-selection settings.
 
-## Project structure
+Each run saves `last.pth`, `history.jsonl`, `config.json`, and `predictions.json`. Checkpoints include the detector, projections, optimizer, AMP scaler, and coefficient-controller state. Resume with `--resume runs/M_seed0/last.pth --output runs/M_seed0`.
 
-```text
-code/                         Runtime paths and file utilities
-projects/rtdetrv4_uav/         QueryDiff losses, teacher targets, training and analysis
-tools/                        Asset checks and detector inference
-docs/                         Method and experiment settings
-data/research_protocol_v1/     Image split definitions
-work/RT-DETRv4/                Detector implementation and configurations
-work/visdrone-det-toolkit-python-api/  Detection evaluation
-research/2026_method_survey_20261010/upstream/anyup_archive/  AnyUp
+## Prediction and evaluation
+
+```bash
+python tools/predict.py --checkpoint runs/M_seed0/last.pth --images data/VisDrone2019-DET-test-dev/images --output runs/M_seed0/test_predictions.json
+python tools/evaluate.py --data data/VisDrone2019-DET-test-dev --predictions runs/M_seed0/test_predictions.json --protocol both --output runs/M_seed0/test_metrics.json
+```
+
+Prediction retains one highest-scoring class and one box per ordinary query, then stably ranks up to 300 valid predictions per image. Coordinates are mapped back to the original image; AP evaluation applies neither NMS nor a visualization score threshold.
+
+`--protocol official` uses the VisDrone VOC precision-envelope integration and class-occurrence aggregation. `--protocol qde` uses QDE-AP300-v1, equal-class averaging at 101 recall points, and the defined subset-ignore order. Fixed geometric strata can be selected with `--subset small_shared`, `small_exclusive`, `larger_shared`, or `larger_exclusive`.
+
+For degraded-image predictions, use `--condition down2`, `down4`, `blur1`, or `blur2` with `tools/predict.py`.
+
+## Citation
+
+```bibtex
+@misc{hu2026querydiff,
+  title={Local Query Difference Distillation for Dense Aerial Object Detection},
+  author={Hu, Yanting and Zeng, Qinyong and Wen, Jiahao},
+  year={2026},
+  howpublished={\url{https://github.com/huhufrfr186-spec/QueryDiff-}}
+}
 ```
 
 ## Acknowledgments
 
-QueryDiff uses RT-DETRv4, CLIP, AnyUp, and the VisDrone evaluation toolkit. Source links and license information are provided in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Third-party components retain their respective licenses.
+QueryDiff uses RT-DETRv4, CLIP, AnyUp, and the VisDrone evaluation toolkit. Attribution and license information are provided in [Third-party notices](THIRD_PARTY_NOTICES.md).
